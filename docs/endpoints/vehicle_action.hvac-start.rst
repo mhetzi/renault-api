@@ -7,9 +7,31 @@ Base url:
    ``/commerce/v1/accounts/{account_id}/kamereon/kca/car-adapter/v1/cars/{vin}/actions/hvac-start``
 
 Sample payload:
-   Sample payload is not yet available for this endpoint.
+   Start HVAC:
 
-   Please check the `Contributor Guide`_ to provide a sample.
+   .. code-block:: JavaScript
+
+      {
+         "data": {
+            "type": "HvacStart",
+            "attributes": {
+               "action": "start"
+            }
+         }
+      }
+
+   Stop HVAC:
+
+   .. code-block:: JavaScript
+
+      {
+         "data": {
+            "type": "HvacStart",
+            "attributes": {
+               "action": "stop"
+            }
+         }
+      }
 
 .. note::
    On Zoe50 (model code X102VE):
