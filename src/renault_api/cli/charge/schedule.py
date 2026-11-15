@@ -172,12 +172,6 @@ async def _get_schedule(
     type=click.Choice(DAYS_OF_WEEK),
     help="KCM weekday to activate (repeat for multiple days).",
 )
-@click.option("--clear-days", is_flag=True, help="Clear all KCM active weekdays.")
-@click.option(
-    "--program-type",
-    type=click.Choice(["CHARGE", "PRECONDITIONING", "CHARGE_AND_PRECONDITIONING"]),
-    help="KCM program type; defaults to the current type for the selected slot.",
-)
 @click.option("--active/--inactive", default=None, help="Set KCM program activation.")
 @click.pass_obj
 @helpers.coro_with_websession
@@ -188,7 +182,6 @@ async def set(
     websession: aiohttp.ClientSession,
     departure_time: str | None,
     kcm_days: tuple[str, ...],
-    clear_days: bool,
     program_type: str | None,
     active: bool | None,
     **kwargs: Any,
@@ -208,8 +201,8 @@ async def set(
         program = _get_kcm_program(programs, id)
         if departure_time is not None:
             program.departure_time = departure_time
-        if kcm_days or clear_days:
-            program.days = [] if clear_days else list(kcm_days)
+        if kcm_days:
+            program.days = list(kcm_days)
         if program_type is not None:
             program.program_type = program_type
         if active is not None:
@@ -221,7 +214,6 @@ async def set(
     if (
         departure_time is not None
         or kcm_days
-        or clear_days
         or program_type
         or active is not None
     ):
