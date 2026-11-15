@@ -4,6 +4,8 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from datetime import time
 from typing import Any
 from typing import cast
 from warnings import warn
@@ -476,7 +478,7 @@ _VEHICLE_ENDPOINTS: dict[str, dict[str, EndpointDefinition | None]] = {
         "soc-levels": _DEFAULT_ENDPOINTS["soc-levels"],
     },
     "XCB1VE": {  # MEGANE E-TECH
-        "actions/charge-set-schedule": _KCM_ENDPOINTS["actions/charge-set-schedule"],
+        "actions/charge-set-schedule": None,  # Schedule is set via ev/settings
         "actions/charge-start": _KCM_ENDPOINTS["actions/charge-start"],
         "actions/charge-stop": None,  # Reason: err.func.wired.invalid-body-format
         "actions/horn-start": _DEFAULT_ENDPOINTS["actions/horn-start"],
@@ -1391,6 +1393,60 @@ class ChargeSchedule(BaseModel):
             else:
                 result[day] = day_spec.for_json()
         return result
+
+
+@dataclass
+class KcmEvProgram(BaseModel):
+    """Departure program from the KCM EV settings endpoint."""
+
+    departure_time: str
+    days: list[str] = dataclass_field(default_factory=list)
+    active: bool = True
+    program_type: str | None = None
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "KcmEvProgram":
+        """Create a departure program from KCM response data."""
+        return cls(
+            raw_data=data,
+            departure_time=data.get("programDepartureTime", ""),
+            days=[
+                day
+                for day in helpers.DAYS_OF_WEEK
+                if data.get(f"programActivation{day.capitalize()}") is True
+            ],
+            active=data.get("programActivationStatus", False) is True,
+            program_type=data.get("programType"),
+        )
+
+    def for_json(self, existing_program: dict[str, Any]) -> dict[str, Any]:
+        """Create a KCM program payload, preserving its existing type by default."""
+        try:
+            parsed_time = time.fromisoformat(self.departure_time)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid KCM program departure time: {self.departure_time!r}."
+            ) from exc
+        if parsed_time.strftime("%H:%M") != self.departure_time:
+            raise ValueError(
+                f"Invalid KCM program departure time: {self.departure_time!r}."
+            )
+        if any(day not in helpers.DAYS_OF_WEEK for day in self.days):
+            raise ValueError("KCM program days must be valid lowercase weekday names.")
+
+        program_type = self.program_type or existing_program.get("programType")
+        if not isinstance(program_type, str) or not program_type:
+            raise ValueError("A KCM program requires a program type.")
+
+        return {
+            "programActivationStatus": self.active,
+            "programType": program_type,
+            "programDepartureTime": self.departure_time,
+            **{
+                f"programActivation{day.capitalize()}": day in self.days
+                for day in helpers.DAYS_OF_WEEK
+            },
+        }
 
 
 @dataclass

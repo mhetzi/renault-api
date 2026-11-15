@@ -15,6 +15,7 @@ from renault_api.kamereon.helpers import get_end_time
 from renault_api.kamereon.models import ChargeDaySchedule
 from renault_api.kamereon.models import ChargeSchedule
 from renault_api.kamereon.models import KamereonVehicleChargingSettingsData
+from renault_api.kamereon.models import KcmEvProgram
 from renault_api.kamereon.schemas import KamereonVehicleChargingSettingsDataSchema
 from renault_api.renault_vehicle import RenaultVehicle
 
@@ -132,11 +133,13 @@ async def _get_schedule(
     ctx_data: dict[str, Any],
     websession: aiohttp.ClientSession,
     id: int,
+    vehicle: RenaultVehicle | None = None,
 ) -> tuple[RenaultVehicle, list[ChargeSchedule], ChargeSchedule]:
     """Get the given schedules activated-flag to given state."""
-    vehicle = await renault_vehicle.get_vehicle(
-        websession=websession, ctx_data=ctx_data
-    )
+    if vehicle is None:
+        vehicle = await renault_vehicle.get_vehicle(
+            websession=websession, ctx_data=ctx_data
+        )
     response_data = await vehicle._get_vehicle_data("charging-settings")
     response = cast(
         KamereonVehicleChargingSettingsData,
@@ -161,6 +164,21 @@ async def _get_schedule(
     helptext="{} schedule in format `hh:mm,duration` (for local timezone) "
     "or `Thh:mmZ,duration` (for utc) or `clear` to unset."
 )
+@click.option("--departure-time", help="KCM departure time in HH:MM format.")
+@click.option(
+    "--day",
+    "kcm_days",
+    multiple=True,
+    type=click.Choice(DAYS_OF_WEEK),
+    help="KCM weekday to activate (repeat for multiple days).",
+)
+@click.option("--clear-days", is_flag=True, help="Clear all KCM active weekdays.")
+@click.option(
+    "--program-type",
+    type=click.Choice(["CHARGE", "PRECONDITIONING", "CHARGE_AND_PRECONDITIONING"]),
+    help="KCM program type; defaults to the current type for the selected slot.",
+)
+@click.option("--active/--inactive", default=None, help="Set KCM program activation.")
 @click.pass_obj
 @helpers.coro_with_websession
 async def set(
@@ -168,13 +186,52 @@ async def set(
     *,
     id: int,
     websession: aiohttp.ClientSession,
+    departure_time: str | None,
+    kcm_days: tuple[str, ...],
+    clear_days: bool,
+    program_type: str | None,
+    active: bool | None,
     **kwargs: Any,
 ) -> None:
     """Update charging schedule {ID}."""
-    vehicle, schedules, schedule = await _get_schedule(
-        websession=websession, ctx_data=ctx_data, id=id
+    vehicle = await renault_vehicle.get_vehicle(
+        websession=websession, ctx_data=ctx_data
     )
+    endpoint_definition = (await vehicle.get_details()).get_endpoint("charge-schedule")
+    if endpoint_definition is not None and endpoint_definition.mode == "kcm-settings":
+        if any(value is not None for value in kwargs.values()):
+            raise click.UsageError(
+                "For KCM schedules use --departure-time, --day and --clear-days."
+            )
+        settings = await vehicle.get_ev_settings()
+        programs = _parse_kcm_programs(settings)
+        program = _get_kcm_program(programs, id)
+        if departure_time is not None:
+            program.departure_time = departure_time
+        if kcm_days or clear_days:
+            program.days = [] if clear_days else list(kcm_days)
+        if program_type is not None:
+            program.program_type = program_type
+        if active is not None:
+            program.active = active
+        response = await vehicle.set_ev_programs(programs)
+        click.echo(response.raw_data)
+        return
 
+    if (
+        departure_time is not None
+        or kcm_days
+        or clear_days
+        or program_type
+        or active is not None
+    ):
+        raise click.UsageError(
+            "KCM options are only available for KCM schedule vehicles."
+        )
+
+    vehicle, schedules, schedule = await _get_schedule(
+        websession=websession, ctx_data=ctx_data, id=id, vehicle=vehicle
+    )
     update_settings(schedule, **kwargs)
 
     write_response = await vehicle.set_charge_schedules(schedules)
@@ -192,8 +249,19 @@ async def activate(
     websession: aiohttp.ClientSession,
 ) -> None:
     """Activate charging schedule {ID}."""
+    vehicle = await renault_vehicle.get_vehicle(
+        websession=websession, ctx_data=ctx_data
+    )
+    endpoint_definition = (await vehicle.get_details()).get_endpoint("charge-schedule")
+    if endpoint_definition is not None and endpoint_definition.mode == "kcm-settings":
+        programs = _parse_kcm_programs(await vehicle.get_ev_settings())
+        _get_kcm_program(programs, id).active = True
+        response = await vehicle.set_ev_programs(programs)
+        click.echo(response.raw_data)
+        return
+
     vehicle, schedules, schedule = await _get_schedule(
-        websession=websession, ctx_data=ctx_data, id=id
+        ctx_data, websession, id, vehicle=vehicle
     )
 
     schedule.activated = True
@@ -213,14 +281,41 @@ async def deactivate(
     websession: aiohttp.ClientSession,
 ) -> None:
     """Deactivate charging schedule {ID}."""
+    vehicle = await renault_vehicle.get_vehicle(
+        websession=websession, ctx_data=ctx_data
+    )
+    endpoint_definition = (await vehicle.get_details()).get_endpoint("charge-schedule")
+    if endpoint_definition is not None and endpoint_definition.mode == "kcm-settings":
+        programs = _parse_kcm_programs(await vehicle.get_ev_settings())
+        _get_kcm_program(programs, id).active = False
+        response = await vehicle.set_ev_programs(programs)
+        click.echo(response.raw_data)
+        return
+
     vehicle, schedules, schedule = await _get_schedule(
-        websession=websession, ctx_data=ctx_data, id=id
+        ctx_data, websession, id, vehicle=vehicle
     )
 
     schedule.activated = False
 
     write_response = await vehicle.set_charge_schedules(schedules)
     click.echo(write_response.raw_data)
+
+
+def _parse_kcm_programs(settings: dict[str, Any]) -> list[KcmEvProgram]:
+    programs = settings.get("programs")
+    if not isinstance(programs, list) or not all(
+        isinstance(program, dict) for program in programs
+    ):
+        raise ValueError("KCM EV settings did not contain a valid programs list.")
+    return [KcmEvProgram.from_json(program) for program in programs]
+
+
+def _get_kcm_program(programs: list[KcmEvProgram], id: int) -> KcmEvProgram:
+    """Return a KCM program by the zero-based slot number shown by schedule show."""
+    if id < 0 or id >= len(programs):
+        raise IndexError(f"KCM program slot {id} not found.")
+    return programs[id]
 
 
 def update_settings(

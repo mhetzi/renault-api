@@ -1,10 +1,10 @@
 """Test cases for the Renault client API keys."""
 
+import json
 import os
 from datetime import UTC
 from datetime import datetime
 from typing import Any
-from typing import cast
 
 import aiohttp
 import pytest
@@ -27,6 +27,7 @@ from renault_api.exceptions import EndpointNotAvailableError
 from renault_api.kamereon.helpers import DAYS_OF_WEEK
 from renault_api.kamereon.models import ChargeSchedule
 from renault_api.kamereon.models import HvacSchedule
+from renault_api.kamereon.models import KcmEvProgram
 from renault_api.renault_vehicle import RenaultVehicle
 
 
@@ -405,69 +406,139 @@ async def test_set_charge_schedules(
 
 @pytest.mark.asyncio
 async def test_set_charge_schedules_empty(
-    vehicle: RenaultVehicle, mocked_responses: aiointercept, snapshot: SnapshotAssertion
+    vehicle: RenaultVehicle, mocked_responses: aiointercept
 ) -> None:
-    """Test set_charge_schedules when mode is always and current schedules []."""
-    fixtures.inject_get_vehicle_details(mocked_responses, "megane_e-tech.2.json")
-    fixtures.inject_get_charging_settings(mocked_responses, "always")
-    url = fixtures.inject_set_kcm_charge_schedule(mocked_responses, "empty")
-    charge_schedules = await vehicle.get_charging_settings()
-    schedules: list[dict[str, Any]] = [
-        {
-            "id": 1,
-            "activated": True,
-            "monday": {"startTime": "T01:00Z", "duration": 300},
-            "wednesday": {"startTime": "T01:00Z", "duration": 300},
-            "friday": {"startTime": "T01:00Z", "duration": 300},
-            "sunday": {"startTime": "T01:01Z", "duration": 300},
-        }
-    ]
-    for schedule in schedules:
-        charge_schedules.update(schedule)
-    sched = cast(list[ChargeSchedule], charge_schedules.schedules)
-    assert await vehicle.set_charge_schedules(sched)
+    """Test legacy charge schedule setter remains independent from KCM."""
+    fixtures.inject_get_vehicle_details(mocked_responses, "zoe_40.1.json")
+    url = fixtures.inject_set_charge_schedule(mocked_responses, "schedules")
 
+    assert await vehicle.set_charge_schedules([])
     request = mocked_responses.requests[("POST", URL(url))][0]
-    assert request.kwargs["json"] == snapshot
+    payload = request.kwargs.get("json")
+    assert isinstance(payload, dict)
+    assert payload["data"]["type"] == "ChargeSchedule"
 
 
 @pytest.mark.asyncio
-async def test_set_charge_schedules_update(
-    vehicle: RenaultVehicle, mocked_responses: aiointercept, snapshot: SnapshotAssertion
+async def test_set_ev_programs_empty(
+    vehicle: RenaultVehicle, mocked_responses: aiointercept
 ) -> None:
-    """Test set_charge_schedules when mode is always and current schedules []."""
+    """Test disabling all KCM programs while preserving settings and slot data."""
     fixtures.inject_get_vehicle_details(mocked_responses, "megane_e-tech.2.json")
-    fixtures.inject_get_charging_settings(mocked_responses, "multi")
-    url = fixtures.inject_set_kcm_charge_schedule(mocked_responses, "scheduled")
-    charge_schedules = await vehicle.get_charging_settings()
-    schedules: list[dict[str, Any]] = [
-        {
-            "id": 1,
-            "activated": True,
-            "monday": {"startTime": "T02:00Z", "duration": 200},
-            "tuesday": {"startTime": "T02:01Z", "duration": 200},
-            "sunday": {"startTime": "T02:01Z", "duration": 200},
-        },
-        {
-            "id": 3,
-            "activated": True,
-            "monday": {"startTime": "T01:00Z", "duration": 300},
-            "tuesday": {"startTime": "T01:01Z", "duration": 300},
-            "wednesday": {"startTime": "T01:00Z", "duration": 300},
-            "thursday": {"startTime": "T01:00Z", "duration": 300},
-            "friday": {"startTime": "T01:00Z", "duration": 300},
-            "saturday": {"startTime": "T01:01Z", "duration": 300},
-            "sunday": {"startTime": "T01:01Z", "duration": 300},
-        },
-    ]
-    for schedule in schedules:
-        charge_schedules.update(schedule)
+    fixtures.inject_get_ev_settings(mocked_responses, "multi.active")
+    url = fixtures.inject_set_kcm_ev_settings_charge(mocked_responses, "start")
 
-    sched = cast(list[ChargeSchedule], charge_schedules.schedules)
-    assert await vehicle.set_charge_schedules(sched)
-
+    assert await vehicle.set_ev_programs([])
     request = mocked_responses.requests[("POST", URL(url))][0]
-    assert request.kwargs["json"] == snapshot
+    payload = request.kwargs.get("json")
+    assert isinstance(payload, dict)
+    assert payload["chargeModeRq"] == "SCHEDULED"
+    assert payload["chargeTimeStart"] == "01:55"
+    assert len(payload["programs"]) == 3
+    assert all(
+        not program["programActivationStatus"] for program in payload["programs"]
+    )
+    assert all(
+        not program[f"programActivation{day.capitalize()}"]
+        for program in payload["programs"]
+        for day in DAYS_OF_WEEK
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_ev_programs_update(
+    vehicle: RenaultVehicle, mocked_responses: aiointercept
+) -> None:
+    """Test replacing KCM programs and disabling unused server slots."""
+    fixtures.inject_get_vehicle_details(mocked_responses, "megane_e-tech.2.json")
+    fixtures.inject_get_ev_settings(mocked_responses, "multi.active")
+    url = fixtures.inject_set_kcm_ev_settings_charge(mocked_responses, "start")
+    schedules = [
+        KcmEvProgram(
+            raw_data={},
+            departure_time="06:45",
+            days=["monday", "tuesday"],
+        ),
+        KcmEvProgram(
+            raw_data={},
+            departure_time="08:15",
+            days=["friday"],
+        ),
+    ]
+
+    assert await vehicle.set_ev_programs(schedules)
+    request = mocked_responses.requests[("POST", URL(url))][0]
+    payload = request.kwargs.get("json")
+    assert isinstance(payload, dict)
+    assert payload["chargeModeRq"] == "SCHEDULED"
+    assert payload["chargeTimeStart"] == "01:55"
+    assert len(payload["programs"]) == 3
+    assert payload["programs"][0]["programType"] == "CHARGE"
+    assert payload["programs"][0]["programDepartureTime"] == "06:45"
+    assert payload["programs"][0]["programActivationMonday"] is True
+    assert payload["programs"][1]["programType"] == "PRECONDITIONING"
+    assert payload["programs"][1]["programDepartureTime"] == "08:15"
+    assert payload["programs"][1]["programActivationFriday"] is True
+    assert payload["programs"][2]["programType"] == "CHARGE_AND_PRECONDITIONING"
+    assert payload["programs"][2]["programActivationStatus"] is False
+
+
+@pytest.mark.asyncio
+async def test_set_ev_programs_uses_server_program_count(
+    vehicle: RenaultVehicle, mocked_responses: aiointercept
+) -> None:
+    """Test KCM program capacity is derived from the server response."""
+    fixtures.inject_get_vehicle_details(mocked_responses, "megane_e-tech.2.json")
+    settings = json.loads(
+        fixtures.get_file_content(
+            f"{fixtures.KAMEREON_FIXTURE_PATH}/vehicle_kcm_data/"
+            "ev-settings.multi.active.json"
+        )
+    )
+    settings["programs"] = settings["programs"][:2]
+    fixtures.inject_data(
+        mocked_responses,
+        f"{KCM_ADAPTER_PATH}/ev/settings?{DEFAULT_QUERY_STRING}",
+        body=json.dumps(settings),
+    )
+    url = fixtures.inject_set_kcm_ev_settings_charge(mocked_responses, "start")
+    schedules = [KcmEvProgram(raw_data={}, departure_time="06:45", days=["monday"])]
+
+    assert await vehicle.set_ev_programs(schedules)
+    request = mocked_responses.requests[("POST", URL(url))][0]
+    payload = request.kwargs.get("json")
+    assert isinstance(payload, dict)
+    programs = payload["programs"]
+    assert len(programs) == 2
+    assert programs[0]["programDepartureTime"] == "06:45"
+    assert programs[1]["programActivationStatus"] is False
+
+
+@pytest.mark.asyncio
+async def test_set_ev_programs_rejects_more_than_server_program_count(
+    vehicle: RenaultVehicle, mocked_responses: aiointercept
+) -> None:
+    """Test KCM writes reject more schedules than the vehicle has slots."""
+    fixtures.inject_get_vehicle_details(mocked_responses, "megane_e-tech.2.json")
+    settings = json.loads(
+        fixtures.get_file_content(
+            f"{fixtures.KAMEREON_FIXTURE_PATH}/vehicle_kcm_data/"
+            "ev-settings.multi.active.json"
+        )
+    )
+    settings["programs"] = settings["programs"][:2]
+    fixtures.inject_data(
+        mocked_responses,
+        f"{KCM_ADAPTER_PATH}/ev/settings?{DEFAULT_QUERY_STRING}",
+        body=json.dumps(settings),
+    )
+    schedules = [
+        KcmEvProgram(raw_data={}, departure_time=departure_time)
+        for departure_time in ("06:00", "07:00", "08:00")
+    ]
+
+    with pytest.raises(ValueError, match="only 2 program slots"):
+        await vehicle.set_ev_programs(schedules)
 
 
 @pytest.mark.parametrize(

@@ -227,6 +227,73 @@ def test_charge_schedule_show_alternate(
     assert result.output == snapshot
 
 
+def test_charge_schedule_set_kcm(
+    mocked_responses: aiointercept, cli_runner: CliRunner
+) -> None:
+    """Test setting one KCM departure program via the schedule CLI."""
+    initialise_credential_store(include_account_id=True, include_vin=True)
+    fixtures.inject_get_vehicle_details(mocked_responses, "renault_5.1.json")
+    fixtures.inject_get_ev_settings(mocked_responses, "multi.active")
+    fixtures.inject_get_ev_settings(mocked_responses, "multi.active")
+    url = fixtures.inject_set_kcm_ev_settings_charge(mocked_responses, "start")
+
+    result = cli_runner.invoke(
+        __main__.main,
+        "charge schedule set 0 --departure-time 06:45 --day monday --day tuesday",
+    )
+
+    assert result.exit_code == 0, result.exception
+    request = mocked_responses.requests[("POST", URL(url))][0]
+    payload = request.kwargs.get("json")
+    assert isinstance(payload, dict)
+    assert payload["programs"][0]["programDepartureTime"] == "06:45"
+    assert payload["programs"][0]["programType"] == "CHARGE"
+    assert payload["programs"][0]["programActivationMonday"] is True
+    assert payload["programs"][0]["programActivationTuesday"] is True
+    assert payload["programs"][1]["programDepartureTime"] == "08:30"
+
+
+def test_charge_schedule_deactivate_kcm(
+    mocked_responses: aiointercept, cli_runner: CliRunner
+) -> None:
+    """Test deactivating a KCM departure program via the schedule CLI."""
+    initialise_credential_store(include_account_id=True, include_vin=True)
+    fixtures.inject_get_vehicle_details(mocked_responses, "renault_5.1.json")
+    fixtures.inject_get_ev_settings(mocked_responses, "multi.active")
+    fixtures.inject_get_ev_settings(mocked_responses, "multi.active")
+    url = fixtures.inject_set_kcm_ev_settings_charge(mocked_responses, "start")
+
+    result = cli_runner.invoke(__main__.main, "charge schedule deactivate 1")
+
+    assert result.exit_code == 0, result.exception
+    request = mocked_responses.requests[("POST", URL(url))][0]
+    payload = request.kwargs.get("json")
+    assert isinstance(payload, dict)
+    assert payload["programs"][0]["programActivationStatus"] is True
+    assert payload["programs"][1]["programActivationStatus"] is False
+    assert payload["programs"][1]["programType"] == "PRECONDITIONING"
+
+
+def test_charge_schedule_activate_kcm(
+    mocked_responses: aiointercept, cli_runner: CliRunner
+) -> None:
+    """Test activating a KCM departure program via the schedule CLI."""
+    initialise_credential_store(include_account_id=True, include_vin=True)
+    fixtures.inject_get_vehicle_details(mocked_responses, "renault_5.1.json")
+    fixtures.inject_get_ev_settings(mocked_responses, "single.inactive")
+    fixtures.inject_get_ev_settings(mocked_responses, "single.inactive")
+    url = fixtures.inject_set_kcm_ev_settings_charge(mocked_responses, "start")
+
+    result = cli_runner.invoke(__main__.main, "charge schedule activate 0")
+
+    assert result.exit_code == 0, result.exception
+    request = mocked_responses.requests[("POST", URL(url))][0]
+    payload = request.kwargs.get("json")
+    assert isinstance(payload, dict)
+    assert payload["programs"][0]["programActivationStatus"] is True
+    assert payload["programs"][0]["programType"] == "CHARGE_AND_PRECONDITIONING"
+
+
 def test_charging_settings_set(
     mocked_responses: aiointercept, cli_runner: CliRunner, snapshot: SnapshotAssertion
 ) -> None:
@@ -242,7 +309,7 @@ def test_charging_settings_set(
     result = cli_runner.invoke(
         __main__.main, f"charge schedule set 1 {monday} {friday} {saturday}"
     )
-    assert result.exit_code == 0, result.exception
+    assert result.exit_code == 0, (result.exception, result.output)
     request = mocked_responses.requests[("POST", URL(url))][0]
     assert request.kwargs["json"] == snapshot
     assert result.output == snapshot

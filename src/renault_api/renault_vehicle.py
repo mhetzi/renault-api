@@ -278,6 +278,73 @@ class RenaultVehicle:
             return response.raw_data
         return response.raw_data["data"]["attributes"]
 
+    async def get_ev_settings(self) -> dict[str, Any]:
+        """Get the full KCM EV settings state."""
+        endpoint_definition = await self.get_endpoint_definition("charge-schedule")
+        if endpoint_definition.mode != "kcm-settings":
+            raise ValueError("This vehicle does not use KCM EV settings.")
+        response = await self._get_vehicle_data(endpoint_definition)
+        settings = response.raw_data
+        if not isinstance(settings.get("programs"), list):
+            raise ValueError("KCM EV settings did not contain a programs list.")
+        return settings
+
+    async def set_ev_programs(
+        self, programs: list[models.KcmEvProgram]
+    ) -> models.KamereonVehicleChargeScheduleActionData:
+        """Replace KCM departure programs while preserving other EV settings."""
+        if any(not isinstance(program, models.KcmEvProgram) for program in programs):
+            raise TypeError("`programs` must contain only KcmEvProgram instances.")
+
+        endpoint_definition = await self.get_endpoint_definition("charge-schedule")
+        if endpoint_definition.mode != "kcm-settings":
+            raise ValueError("This vehicle does not use KCM EV settings.")
+
+        settings_response = await self._get_vehicle_data(endpoint_definition)
+        settings = settings_response.raw_data
+        existing_programs = settings.get("programs")
+        if not isinstance(existing_programs, list) or not all(
+            isinstance(program, dict) for program in existing_programs
+        ):
+            raise ValueError("KCM EV settings did not contain a valid programs list.")
+        if len(programs) > len(existing_programs):
+            raise ValueError(
+                f"Received {len(programs)} programs, but the vehicle exposes "
+                f"only {len(existing_programs)} program slots."
+            )
+
+        updated_programs: list[dict[str, Any]] = []
+        for index, existing_program in enumerate(existing_programs):
+            if index < len(programs):
+                updated_programs.append(programs[index].for_json(existing_program))
+                continue
+            inactive_program = dict(existing_program)
+            inactive_program["programActivationStatus"] = False
+            for day in (
+                "Monday",
+                "Tuesday",
+                "Wednesday",
+                "Thursday",
+                "Friday",
+                "Saturday",
+                "Sunday",
+            ):
+                inactive_program[f"programActivation{day}"] = False
+            updated_programs.append(inactive_program)
+
+        payload = dict(settings)
+        payload["lastSettingsUpdateTimestamp"] = (
+            datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        )
+        payload["programs"] = updated_programs
+        response = await self._set_vehicle_data(endpoint_definition, payload)
+        return cast(
+            models.KamereonVehicleChargeScheduleActionData,
+            response.get_attributes(
+                schemas.KamereonVehicleChargeScheduleActionDataSchema
+            ),
+        )
+
     async def get_notification_settings(
         self,
     ) -> models.KamereonVehicleNotificationSettingsData:
@@ -602,6 +669,7 @@ class RenaultVehicle:
                     },
                 }
             }
+
         response = await self._set_vehicle_data(endpoint_definition, json)
         return cast(
             models.KamereonVehicleChargingStartActionData,
